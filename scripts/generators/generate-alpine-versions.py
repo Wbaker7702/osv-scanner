@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+"""Generate fixtures for Alpine package version comparison tests."""
+
+# pylint: disable=invalid-name
 
 import atexit
 import json
@@ -32,248 +35,337 @@ UNSUPPORTED_COMPARISONS = []
 
 
 def is_unsupported_comparison(line):
-  return line in UNSUPPORTED_COMPARISONS
+    """Return True if the provided comparison clause is explicitly unsupported."""
+
+    return line in UNSUPPORTED_COMPARISONS
 
 
 def uncomment(line):
-  if line.startswith('#'):
-    return line[1:]
-  if line.startswith('//'):
-    return line[2:]
-  return line
+    """Remove comment markers ("#" or "//") from the start of a line."""
+
+    if line.startswith('#'):
+        return line[1:]
+    if line.startswith('//'):
+        return line[2:]
+    return line
 
 
 def download_alpine_db():
-  urllib.request.urlretrieve('https://osv-vulnerabilities.storage.googleapis.com/Alpine/all.zip', 'alpine-db.zip')
+    """Download the combined Alpine OSV database snapshot to the local directory."""
+
+    urllib.request.urlretrieve(
+        'https://osv-vulnerabilities.storage.googleapis.com/Alpine/all.zip', 'alpine-db.zip')
 
 
 def extract_packages_with_versions(osvs):
-  dict = {}
+    """Collect all Alpine package versions mentioned in the provided OSV entries."""
 
-  for osv in osvs:
-    for affected in osv['affected']:
-      if 'package' not in affected or not affected['package']['ecosystem'].startswith('Alpine'):
-        continue
+    package_versions = {}
 
-      package = affected['package']['name']
+    for osv in osvs:
+        for affected in osv['affected']:
+            if (
+                'package' not in affected
+                or not affected['package']['ecosystem'].startswith('Alpine')
+            ):
+                continue
 
-      if package not in dict:
-        dict[package] = []
+            package = affected['package']['name']
 
-      for version in affected.get('versions', []):
-        dict[package].append(AlpineVersion(version))
+            if package not in package_versions:
+                package_versions[package] = []
 
-  # deduplicate and sort the versions for each package
-  for package in dict:
-    dict[package] = sorted(list(dict.fromkeys(dict[package])))
+            for version in affected.get('versions', []):
+                package_versions[package].append(AlpineVersion(version))
 
-  return dict
+    # deduplicate and sort the versions for each package
+    for package in package_versions:
+        package_versions[package] = sorted(
+            list(dict.fromkeys(package_versions[package]))
+        )
 
-
-class AlpineVersionComparer:
-  def __init__(self, cache_path, how):
-    self.cache_path = Path(cache_path)
-    self.cache = {}
-
-    self._alpine_version = '3.10'
-    self._compare_method = how
-    self._docker_container = None
-    self._load_cache()
-
-  def _start_docker_container(self):
-    """
-    Starts the Alpine docker container for use in comparing versions using apk,
-    assigning the name of the container to `self._docker_container` if success.
-
-    If a container has already been started, this does nothing.
-    """
-
-    if self._docker_container is not None:
-      return
-
-    container_name = f'alpine-{self._alpine_version}-container'
-
-    cmd = ['docker', 'run', '--rm', '--name', container_name, '-d', f'alpine:{self._alpine_version}', 'tail', '-f', '/dev/null']
-    out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    if out.returncode != 0:
-      raise Exception(f'failed to start {container_name} container: {out.stderr.decode("utf-8")}')
-    self._docker_container = container_name
-    atexit.register(self._stop_docker_container)
-
-  def _stop_docker_container(self):
-    if self._docker_container is None:
-      raise Exception(f'called to stop docker container when none was started')
-
-    cmd = ['docker', 'stop', '-t', '0', self._docker_container]
-    out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    if out.returncode != 0:
-      raise Exception(f'failed to stop {self._docker_container} container: {out.stderr.decode("utf-8")}')
-
-  def _load_cache(self):
-    if self.cache_path:
-      self.cache_path.touch()
-      with open(self.cache_path, 'r') as f:
-        lines = f.readlines()
-
-        for line in lines:
-          line = line.strip()
-          key, result = line.split(',')
-
-          if result == 'True':
-            self.cache[key] = True
-            continue
-          if result == 'False':
-            self.cache[key] = False
-            continue
-
-          print(f"ignoring invalid cache entry '{line}'")
-
-  def _save_to_cache(self, key, result):
-    self.cache[key] = result
-    if self.cache_path:
-      self.cache_path.touch()
-      with open(self.cache_path, 'a') as f:
-        f.write(f'{key},{result}\n')
-
-  def _compare_command(self, a, b):
-    if self._compare_method == 'run':
-      return ['docker', 'run', '--rm', f'alpine:{self._alpine_version}', 'apk', 'version', '-t', a, b]
-
-    self._start_docker_container()
-
-    return ['docker', 'exec', self._docker_container, 'apk', 'version', '-t', a, b]
-
-  def compare(self, a, op, b):
-    key = f'{a} {op} {b}'
-    if key in self.cache:
-      return self.cache[key]
-
-    out = subprocess.run(self._compare_command(a, b), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    if out.returncode != 0:
-      raise Exception(f'apk did not like comparing {a} {op} {b}: {out.stderr.decode("utf-8")}')
-
-    r = out.stdout.decode('utf-8').strip() == op
-    self._save_to_cache(key, r)
-    return r
+    return package_versions
 
 
-alpine_comparer = AlpineVersionComparer('/tmp/alpine-versions-generator-cache.csv', 'exec')
+class AlpineVersionComparer:  # pylint: disable=too-few-public-methods
+    """Helper that compares Alpine versions, caching results via Docker when available."""
+
+    def __init__(self, cache_path, how):
+        self.cache_path = Path(cache_path)
+        self.cache = {}
+
+        self._alpine_version = '3.10'
+        self._compare_method = how
+        self._docker_container = None
+        self._load_cache()
+
+    def _start_docker_container(self):
+        """
+        Starts the Alpine docker container for use in comparing versions using apk,
+        assigning the name of the container to `self._docker_container` if success.
+
+        If a container has already been started, this does nothing.
+        """
+
+        if self._docker_container is not None:
+            return
+
+        container_name = f'alpine-{self._alpine_version}-container'
+
+        cmd = [
+            'docker',
+            'run',
+            '--rm',
+            '--name',
+            container_name,
+            '-d',
+            f'alpine:{self._alpine_version}',
+            'tail',
+            '-f',
+            '/dev/null',
+        ]
+        out = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        if out.returncode != 0:
+            raise RuntimeError(
+                'failed to start '
+                f'{container_name} container: {out.stderr.decode("utf-8")}'
+            )
+        self._docker_container = container_name
+        atexit.register(self._stop_docker_container)
+
+    def _stop_docker_container(self):
+        if self._docker_container is None:
+            raise RuntimeError('called to stop docker container when none was started')
+
+        cmd = ['docker', 'stop', '-t', '0', self._docker_container]
+        out = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        if out.returncode != 0:
+            raise RuntimeError(
+                'failed to stop '
+                f'{self._docker_container} container: {out.stderr.decode("utf-8")}'
+            )
+
+    def _load_cache(self):
+        if self.cache_path:
+            self.cache_path.touch()
+            with open(self.cache_path, 'r', encoding='utf-8') as cache_file:
+                lines = cache_file.readlines()
+
+                for line in lines:
+                    line = line.strip()
+                    key, result = line.split(',')
+
+                    if result == 'True':
+                        self.cache[key] = True
+                        continue
+                    if result == 'False':
+                        self.cache[key] = False
+                        continue
+
+                    print(f"ignoring invalid cache entry '{line}'")
+
+    def _save_to_cache(self, key, result):
+        self.cache[key] = result
+        if self.cache_path:
+            self.cache_path.touch()
+            with open(self.cache_path, 'a', encoding='utf-8') as cache_file:
+                cache_file.write(f'{key},{result}\n')
+
+    def _compare_command(self, a, b):
+        if self._compare_method == 'run':
+            return [
+                'docker',
+                'run',
+                '--rm',
+                f'alpine:{self._alpine_version}',
+                'apk',
+                'version',
+                '-t',
+                a,
+                b,
+            ]
+
+        self._start_docker_container()
+
+        return [
+            'docker',
+            'exec',
+            self._docker_container,
+            'apk',
+            'version',
+            '-t',
+            a,
+            b,
+        ]
+
+    def compare(self, a, op, b):
+        """Compare two version strings using the configured comparison mechanism."""
+
+        key = f'{a} {op} {b}'
+        if key in self.cache:
+            return self.cache[key]
+
+        out = subprocess.run(
+            self._compare_command(a, b),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+        if out.returncode != 0:
+            raise RuntimeError(
+                'apk did not like comparing '
+                f'{a} {op} {b}: {out.stderr.decode("utf-8")}'
+            )
+
+        r = out.stdout.decode('utf-8').strip() == op
+        self._save_to_cache(key, r)
+        return r
 
 
-class AlpineVersion:
-  def __str__(self):
-    return self.version
+alpine_comparer = AlpineVersionComparer(
+    '/tmp/alpine-versions-generator-cache.csv',
+    'exec',
+)
 
-  def __hash__(self):
-    return hash(self.version)
 
-  def __init__(self, version):
-    self.version = version
+class AlpineVersion:  # pylint: disable=too-few-public-methods
+    """Comparable Alpine package version that delegates comparisons to the comparer."""
 
-  def __lt__(self, other):
-    return alpine_comparer.compare(self.version, '<', other.version)
+    def __str__(self):
+        return self.version
 
-  def __gt__(self, other):
-    return alpine_comparer.compare(self.version, '>', other.version)
+    def __hash__(self):
+        return hash(self.version)
 
-  def __eq__(self, other):
-    return alpine_comparer.compare(self.version, '=', other.version)
+    def __init__(self, version):
+        self.version = version
+
+    def __lt__(self, other):
+        return alpine_comparer.compare(self.version, '<', other.version)
+
+    def __gt__(self, other):
+        return alpine_comparer.compare(self.version, '>', other.version)
+
+    def __eq__(self, other):
+        return alpine_comparer.compare(self.version, '=', other.version)
 
 
 def compare(v1, relate, v2):
-  ops = {'<': operator.lt, '=': operator.eq, '>': operator.gt}
-  return ops[relate](v1, v2)
+    """Evaluate the relationship between two versions using the provided operator."""
+
+    ops = {'<': operator.lt, '=': operator.eq, '>': operator.gt}
+    return ops[relate](v1, v2)
 
 
 def compare_versions(lines, select='all'):
-  has_any_failed = False
+    """Print comparison results for all lines, optionally filtering successes or failures."""
 
-  for line in lines:
-    line = line.strip()
+    has_any_failed = False
 
-    if line == '' or line.startswith('#') or line.startswith('//'):
-      maybe_unsupported = uncomment(line).strip()
+    for line in lines:
+        line = line.strip()
 
-      if is_unsupported_comparison(maybe_unsupported):
-        print(f'\033[96mS\033[0m: \033[93m{maybe_unsupported}\033[0m')
-      continue
+        if line == '' or line.startswith('#') or line.startswith('//'):
+            maybe_unsupported = uncomment(line).strip()
 
-    v1, op, v2 = line.strip().split(' ')
+            if is_unsupported_comparison(maybe_unsupported):
+                print(f'\033[96mS\033[0m: \033[93m{maybe_unsupported}\033[0m')
+            continue
 
-    r = compare(AlpineVersion(v1), op, AlpineVersion(v2))
+        v1, op, v2 = line.strip().split(' ')
 
-    if not r:
-      has_any_failed = r
+        r = compare(AlpineVersion(v1), op, AlpineVersion(v2))
 
-    if select == 'failures' and r:
-      continue
+        if not r:
+            has_any_failed = r
 
-    if select == 'successes' and not r:
-      continue
+        if select == 'failures' and r:
+            continue
 
-    color = '\033[92m' if r else '\033[91m'
-    rs = 'T' if r else 'F'
-    print(f'{color}{rs}\033[0m: \033[93m{line}\033[0m')
-  return has_any_failed
+        if select == 'successes' and not r:
+            continue
+
+        color = '\033[92m' if r else '\033[91m'
+        rs = 'T' if r else 'F'
+        print(f'{color}{rs}\033[0m: \033[93m{line}\033[0m')
+    return has_any_failed
 
 
 def compare_versions_in_file(filepath, select='all'):
-  with open(filepath) as f:
-    lines = f.readlines()
-    return compare_versions(lines, select)
+    """Run comparisons for the lines contained in a fixture file."""
+
+    with open(filepath, encoding='utf-8') as file_obj:
+        lines = file_obj.readlines()
+        return compare_versions(lines, select)
 
 
 def generate_version_compares(versions):
-  comparisons = []
-  for i, version in enumerate(versions):
-    if i == 0:
-      continue
+    """Yield ordered comparison statements for a list of Alpine versions."""
 
-    comparison = f'{versions[i - 1]} < {version}\n'
+    comparisons = []
+    for i, version in enumerate(versions):
+        if i == 0:
+            continue
 
-    if is_unsupported_comparison(comparison.strip()):
-      comparison = '# ' + comparison
-    comparisons.append(comparison)
-  return comparisons
+        comparison = f'{versions[i - 1]} < {version}\n'
+
+        if is_unsupported_comparison(comparison.strip()):
+            comparison = '# ' + comparison
+        comparisons.append(comparison)
+    return comparisons
 
 
 def generate_package_compares(packages):
-  comparisons = []
-  for package in packages:
-    versions = packages[package]
-    comparisons.extend(generate_version_compares(versions))
+    """Generate unique comparison statements for all tracked packages."""
 
-  # return comparisons
-  return list(dict.fromkeys(comparisons))
+    comparisons = []
+    for package in packages:
+        versions = packages[package]
+        comparisons.extend(generate_version_compares(versions))
+
+    # return comparisons
+    return list(dict.fromkeys(comparisons))
 
 
 def fetch_packages_versions():
-  download_alpine_db()
-  osvs = []
+    """Download and parse Alpine OSV data into package-version mappings."""
 
-  with zipfile.ZipFile('alpine-db.zip') as db:
-    for fname in db.namelist():
-      with db.open(fname) as osv:
-        osvs.append(json.loads(osv.read().decode('utf-8')))
+    download_alpine_db()
+    osvs = []
 
-  return extract_packages_with_versions(osvs)
+    with zipfile.ZipFile('alpine-db.zip') as db:
+        for fname in db.namelist():
+            with db.open(fname) as osv:
+                osvs.append(json.loads(osv.read().decode('utf-8')))
+
+    return extract_packages_with_versions(osvs)
 
 
-outfile = 'internal/semantic/testdata/alpine-versions-generated.txt'
+OUTFILE = 'internal/semantic/testdata/alpine-versions-generated.txt'
 
-packs = fetch_packages_versions()
-with open(outfile, 'w') as f:
-  f.writelines(generate_package_compares(packs))
-  f.write('\n')
+PACKAGE_VERSION_MAP = fetch_packages_versions()
+with open(OUTFILE, 'w', encoding='utf-8') as fixture_file:
+    fixture_file.writelines(generate_package_compares(PACKAGE_VERSION_MAP))
+    fixture_file.write('\n')
 
 # set this to either "failures" or "successes" to only have those comparison results
 # printed; setting it to anything else will have all comparison results printed
 show = os.environ.get('VERSION_GENERATOR_PRINT', 'failures')
 
-did_any_fail = compare_versions_in_file(outfile, show)
+did_any_fail = compare_versions_in_file(OUTFILE, show)
 
 if did_any_fail:
-  sys.exit(1)
+    sys.exit(1)
