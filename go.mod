@@ -15,7 +15,7 @@ require (
 	github.com/charmbracelet/glamour v0.10.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/gkampitakis/go-snaps v0.5.15
-	github.com/go-git/go-git/v5 v5.16.3
+	github.com/go-git/go-git/v5 v5.16.5
 	github.com/google/go-cmp v0.7.0
 	github.com/google/osv-scalibr v0.4.1-0.20251120133224-d7ca2d75c4e9
 	github.com/ianlancetaylor/demangle v0.0.0-20250628045327-2d64ad6b7ec5
